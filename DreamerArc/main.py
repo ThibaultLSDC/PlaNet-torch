@@ -20,7 +20,7 @@ if __name__=='__main__':
         training_iterations=100,
         batch_size=50,
         chunk_length=50,
-        repeat_action=2,
+        repeat_action=4,
         exploration_time=100,
         kl_weight=1.,
         free_nats=3.,

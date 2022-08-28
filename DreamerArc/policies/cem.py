@@ -28,7 +28,7 @@ class CEM:
         encoded = self.world_model.encoder(obs)
         for i in range(self.optimization_iteration):
             # batch_size x time x action_dim --> time x batch_size x action_dim
-            actions = dist.sample((self.candidates_per_iteration,)).transpose(0, 1).clip(-1, 1)
+            actions = dist.sample((self.candidates_per_iteration,)).transpose(0, 1)
 
             if state == None:
                 stoch_state, state = self.world_model.init_deterministic_state(encoded)
@@ -52,7 +52,7 @@ class CEM:
             
             reward = reward.sum(0).squeeze() # bs
 
-            k_best = torch.argsort(reward, dim=0)[:self.sorted_candidates]
+            k_best = torch.argsort(reward, dim=0, descending=True)[:self.sorted_candidates]
 
             # time x batch_size x action_dim --> k_best x time x action_dim
             actions = actions.transpose(0, 1)[k_best]

@@ -66,6 +66,7 @@ class Trainer:
         action = batch[1].to(self.device).transpose(0, 1)
         reward = batch[2].to(self.device).transpose(0, 1)
         done = batch[3].to(self.device).transpose(0, 1)
+        mask = batch[4].to(self.device).transpose(0, 1)
 
         assert obs.shape[0:2] == (self.chunk_length + 1, self.batch_size), \
             f"Obs isn't 'time then batch' shape, {obs.shape[0:2]} instead of {(self.chunk_length + 1, self.batch_size)}"
@@ -98,13 +99,16 @@ class Trainer:
         
         pred_obs = bottle(self.model.decoder, states, posterior_samples)
         assert pred_obs.shape == obs[1:].shape, f"Shape mismatch on observations, got {pred_obs.shape} instead of {obs.shape}"
-        loss_obs = F.mse_loss(pred_obs, obs[1:], reduction='none').sum((2, 3, 4)).mean()
+        loss_obs = F.mse_loss(pred_obs, obs[1:], reduction='none').sum((2, 3, 4))
+        loss_obs = (loss_obs * mask).sum() / (mask.sum() + 1e-9)
 
         pred_reward = bottle(self.model.forward_reward, states, posterior_samples)
         assert pred_reward.shape == reward.shape
-        loss_reward = F.mse_loss(pred_reward, reward.float()).mean()
+        loss_reward = F.mse_loss(pred_reward, reward.float()).squeeze()
+        loss_reward = (loss_reward * mask).sum() / (mask.sum() + 1e-9)
 
-        loss_kl = torch.max(tfd.kl_divergence(posterior_dist, prior_dist).sum(-1), self.free_nats).mean()
+        loss_kl = torch.max(tfd.kl_divergence(posterior_dist, prior_dist).sum(-1), self.free_nats)
+        loss_kl = (loss_kl * mask).sum() / (mask.sum() + 1e-6)
 
         self.optim.zero_grad()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1000., norm_type=2)
@@ -139,8 +143,8 @@ class Trainer:
                 action = action + torch.randn_like(action) * 0.3
 
                 reward = 0
-                for _ in range(self.repeat_action):
-                    if save_gif:
+                for i in range(self.repeat_action):
+                    if save_gif and i%2 == 0:
                         next_obs, r, done, _, img = self.env.step(action, return_obs=True)
                         list_img.append(Image.fromarray(img))
                     else:
@@ -155,7 +159,7 @@ class Trainer:
                 total_reward += reward
 
                 if done:
-                    print(f"Total reward for the episode was {total_reward}")
+                    # print(f"Total reward for the episode was {total_reward}")
                     total_reward = 0
                     episode.end()
                     self.buffer.store(episode)
@@ -194,7 +198,6 @@ class Trainer:
                 metrics = self.train_on_batch()
 
                 counter.set_description(
-                    f"Opt Epoch {epoch}, loss_obs = {metrics['loss_obs']:.4f}, \
-                        loss_rew = {metrics['loss_reward']:.4f}, loss_kl = {metrics['loss_kl']:.4f}")
+                    f"Opt Epoch {epoch}, loss_obs = {metrics['loss_obs']:.4f}, loss_rew = {metrics['loss_reward']:.4f}, loss_kl = {metrics['loss_kl']:.4f}")
 
             self.explore(epoch, save_gif=True)
