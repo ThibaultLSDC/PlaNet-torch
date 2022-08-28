@@ -33,32 +33,35 @@ def process_img(img: torch.Tensor, depth: int=5):
 
 
 class TorchImageEnvWrapper:
-    def __init__(self, env: str, render_allowed: bool=False, bit_depth: int=5, observation_size: tuple=None, action_repeat: int=2) -> None:
-        self.env = gym.make(env)
-        self.render_allowed = render_allowed
+    def __init__(self, env: str, bit_depth: int=5, observation_size: tuple=None) -> None:
+        self.env = gym.make(env, render_mode='rgb_array')
+        
         self.bit_depth = bit_depth
         self.observation_size = observation_size if observation_size is not None else (64, 64)
-        self.action_repeat = action_repeat
     
-    def reset(self):
+    def reset(self, return_obs=False):
         self.env.reset()
-        obs = to_torch_img(self.env.render(mode='rgb_array'))
-        return process_img(obs, self.bit_depth)
+        obs = self.env.render()[0]
+        tmp = to_torch_img(obs)
+        if return_obs:
+            return process_img(tmp, self.bit_depth), obs
+        else:
+            return process_img(tmp, self.bit_depth)
     
-    def step(self, action: torch.Tensor):
-        action, rewards = action.cpu().detach().numpy(), 0
-        for _ in range(self.action_repeat):
-            _, reward, done, info = self.env.step(action)
-            rewards += reward
-        obs = to_torch_img(self.env.render(mode='rgb_array'))
+    def step(self, action: torch.Tensor, return_obs: bool=False):
+        action = action.cpu().detach().numpy()
+        _, reward, done, info = self.env.step(action)
+        img = self.env.render()[0]
+        obs = to_torch_img(img)
         obs = process_img(obs, self.bit_depth)
-        return obs, rewards, done, info
+        if return_obs:
+            return obs, reward, done, info, img
+        else:
+            return obs, reward, done, info
     
     def render(self):
-        if self.render_allowed:
-            self.env.render()
-        else:
-            pass
+        obs = self.env.render()[0]
+        return obs
 
     def sample(self):
         return torch.tensor(self.env.action_space.sample())
