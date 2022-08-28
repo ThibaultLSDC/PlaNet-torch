@@ -11,7 +11,8 @@ class CEM:
         planning_horizon: int,
         optimization_iteration: int,
         candidates_per_iteration: int,
-        sorted_candidates: int
+        sorted_candidates: int,
+        action_bounds,
         ) -> None:
         
         self.world_model = world_model
@@ -19,6 +20,7 @@ class CEM:
         self.optimization_iteration = optimization_iteration
         self.candidates_per_iteration = candidates_per_iteration
         self.sorted_candidates = sorted_candidates
+        self.action_bounds = action_bounds
 
     def act(self, obs: torch.Tensor, example_action: torch.Tensor, state: torch.Tensor=None) -> torch.Tensor:
         dev = obs.device
@@ -28,7 +30,7 @@ class CEM:
         encoded = self.world_model.encoder(obs)
         for i in range(self.optimization_iteration):
             # batch_size x time x action_dim --> time x batch_size x action_dim
-            actions = dist.sample((self.candidates_per_iteration,)).transpose(0, 1)
+            actions = dist.sample((self.candidates_per_iteration,)).transpose(0, 1).clip(self.action_bounds[0], self.action_bounds[1])
 
             if state == None:
                 stoch_state, state = self.world_model.init_deterministic_state(encoded)

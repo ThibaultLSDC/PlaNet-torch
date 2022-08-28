@@ -2,7 +2,7 @@ from env_wrapper import TorchImageEnvWrapper
 from models.rssm import RSSM
 from policies.cem import CEM
 from memory.buffer import Buffer, Episode
-from utils import bottle
+from utils import bottle, Tracker
 
 import torch
 import torch.distributions as tfd
@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from PIL import Image
+
+import wandb
 
 
 class Trainer:
@@ -27,7 +29,8 @@ class Trainer:
         free_nats: float,
         device: str,
         cem_conf: dict,
-        output_path: str='data'
+        output_path: str='data',
+        track_wandb: bool=False,
         ) -> None:
 
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
@@ -36,7 +39,8 @@ class Trainer:
         self.model = RSSM(self.env.action_space).to(self.device)
         self.policy = CEM(
             self.model,
-            **cem_conf
+            **cem_conf,
+            action_bounds=self.env.action_bounds
         )
         self.buffer = Buffer(100)
 
@@ -57,6 +61,12 @@ class Trainer:
         self.optim = torch.optim.Adam(self.model.parameters(), 1e-3, eps=1e-4)
 
         self.output_path = output_path
+
+        self.tracker = Tracker(['loss_obs', 'loss_reward', 'loss_kl', 'reward'], ['animation'])
+
+        if track_wandb:
+            wandb.init(project=f"PlaNet_{env}")
+
 
     def train_on_batch(self):
         # pick a batch and extract
@@ -170,6 +180,10 @@ class Trainer:
                         list_img = [Image.fromarray(img)]
                     else:
                         obs = self.env.reset()
+        return {
+            'reward': total_reward,
+            'animation': f"{self.output_path}/ep_{epoch}.gif"
+        }
 
     def train(self, epochs: int):
 
@@ -197,7 +211,15 @@ class Trainer:
             for step in counter:
                 metrics = self.train_on_batch()
 
+                self.tracker.step(metrics)
+                metrics = self.tracker.showcase(['loss_obs', 'loss_reward', 'loss_kl'])
+
                 counter.set_description(
                     f"Opt Epoch {epoch}, loss_obs = {metrics['loss_obs']:.4f}, loss_rew = {metrics['loss_reward']:.4f}, loss_kl = {metrics['loss_kl']:.4f}")
 
-            self.explore(epoch, save_gif=True)
+            metrics = self.explore(epoch, save_gif=True)
+            self.tracker.step(metrics)
+
+            metrics = self.tracker.terminate()
+
+            wandb.log(metrics)

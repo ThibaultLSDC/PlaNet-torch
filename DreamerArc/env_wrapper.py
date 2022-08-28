@@ -76,3 +76,7 @@ class TorchImageEnvWrapper:
     @property
     def action_space(self):
         return self.env.action_space.shape[0]
+    
+    @property
+    def action_bounds(self):
+        return (self.env.action_space.low[0], self.env.action_space.high[0])

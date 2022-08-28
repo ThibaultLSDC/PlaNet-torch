@@ -17,7 +17,7 @@ if __name__=='__main__':
     trainer = Trainer(
         'Pendulum-v1',
         seed_episodes=5,
-        training_iterations=100,
+        training_iterations=5,
         batch_size=50,
         chunk_length=50,
         repeat_action=4,
@@ -25,7 +25,8 @@ if __name__=='__main__':
         kl_weight=1.,
         free_nats=3.,
         device=device,
-        cem_conf=cem_conf
+        cem_conf=cem_conf,
+        track_wandb=True
     )
     
     trainer.train(100)
