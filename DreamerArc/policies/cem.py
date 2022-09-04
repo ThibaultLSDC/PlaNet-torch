@@ -60,13 +60,13 @@ class CEM:
             actions = actions.transpose(0, 1)[k_best]
 
             # time x action_dim
-            mu = torch.mean(actions, dim=0, keepdim=False)
-            std = torch.sum(torch.abs(actions - mu), dim=0) / (self.sorted_candidates - 1)
+            mu = actions.mean(dim=0)
+            std = actions.std(dim=0)
             
             assert mu.shape == (self.planning_horizon,) + example_action.shape, \
                 f"Shape mismatch, has shape {mu.shape} instead of {(self.planning_horizon,) + example_action.shape}"
 
-            dist = tfd.Normal(mu, std.square() + 1e-9)
+            dist = tfd.Normal(mu, std + 1e-9)
         
         assert mu.shape == shape, f"Output mismatch, has shape {mu.shape} instead of {shape}"
 

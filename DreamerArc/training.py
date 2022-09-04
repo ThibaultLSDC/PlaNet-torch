@@ -1,11 +1,12 @@
 from env_wrapper import TorchImageEnvWrapper
 from models.rssm import RSSM
-from policies.cem import CEM
+from policies.cem2 import CEM
 from memory.buffer import Buffer, Episode
 from utils import bottle, Tracker
 
 import torch
 import torch.distributions as tfd
+import numpy as np
 
 import torch.nn.functional as F
 
@@ -15,10 +16,13 @@ from PIL import Image
 
 import wandb
 
+from adan_pytorch import Adan
+
 
 class Trainer:
     def __init__(self,
         env,
+        buffer_size: int,
         seed_episodes: int,
         training_iterations: int,
         batch_size: int,
@@ -29,6 +33,7 @@ class Trainer:
         free_nats: float,
         device: str,
         cem_conf: dict,
+        optim: str='Adam',
         output_path: str='data',
         track_wandb: bool=False,
         ) -> None:
@@ -40,9 +45,10 @@ class Trainer:
         self.policy = CEM(
             self.model,
             **cem_conf,
-            action_bounds=self.env.action_bounds
+            action_bounds=self.env.action_bounds,
+            device=self.device
         )
-        self.buffer = Buffer(100)
+        self.buffer = Buffer(buffer_size)
 
         # optimization
         self.seed_episodes = seed_episodes
@@ -58,12 +64,16 @@ class Trainer:
 
         self.trained_steps = 0
 
-        self.optim = torch.optim.Adam(self.model.parameters(), 1e-3, eps=1e-4)
+        if optim == 'Adam':
+            self.optim = torch.optim.Adam(self.model.parameters(), 1e-3, eps=1e-4)
+        elif optim == 'Adan':
+            self.optim = Adan(self.model.parameters(), lr=1e-3, eps=1e-4)
 
         self.output_path = output_path
 
-        self.tracker = Tracker(['loss_obs', 'loss_reward', 'loss_kl', 'reward'], ['animation'])
+        self.tracker = Tracker(['loss_obs', 'loss_reward', 'loss_kl', 'reward', 'grad_norm'], ['animation'])
 
+        self.track_wandb = track_wandb
         if track_wandb:
             wandb.init(project=f"PlaNet_{env}")
 
@@ -76,7 +86,6 @@ class Trainer:
         action = batch[1].to(self.device).transpose(0, 1)
         reward = batch[2].to(self.device).transpose(0, 1)
         done = batch[3].to(self.device).transpose(0, 1)
-        mask = batch[4].to(self.device).transpose(0, 1)
 
         assert obs.shape[0:2] == (self.chunk_length + 1, self.batch_size), \
             f"Obs isn't 'time then batch' shape, {obs.shape[0:2]} instead of {(self.chunk_length + 1, self.batch_size)}"
@@ -109,26 +118,24 @@ class Trainer:
         
         pred_obs = bottle(self.model.decoder, states, posterior_samples)
         assert pred_obs.shape == obs[1:].shape, f"Shape mismatch on observations, got {pred_obs.shape} instead of {obs.shape}"
-        loss_obs = F.mse_loss(pred_obs, obs[1:], reduction='none').sum((2, 3, 4))
-        loss_obs = (loss_obs * mask).sum() / (mask.sum() + 1e-9)
+        loss_obs = F.mse_loss(pred_obs, obs[1:], reduction='none').sum((2, 3, 4)).mean()
 
         pred_reward = bottle(self.model.forward_reward, states, posterior_samples)
         assert pred_reward.shape == reward.shape
-        loss_reward = F.mse_loss(pred_reward, reward.float()).squeeze()
-        loss_reward = (loss_reward * mask).sum() / (mask.sum() + 1e-9)
+        loss_reward = F.mse_loss(pred_reward, reward.float()).mean()
 
-        loss_kl = torch.max(tfd.kl_divergence(posterior_dist, prior_dist).sum(-1), self.free_nats)
-        loss_kl = (loss_kl * mask).sum() / (mask.sum() + 1e-6)
+        loss_kl = torch.max(tfd.kl_divergence(posterior_dist, prior_dist).sum(-1), self.free_nats).mean()
 
         self.optim.zero_grad()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1000., norm_type=2)
-        (loss_obs + loss_reward + self.kl_weight*loss_kl).backward()
+        (loss_obs + 10 * loss_reward + self.kl_weight*loss_kl).backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1000., norm_type=2)
         self.optim.step()
 
         metrics = {
             'loss_obs': loss_obs.detach().cpu().numpy(),
             'loss_reward': loss_reward.detach().cpu().numpy(),
-            'loss_kl': loss_kl.detach().cpu().numpy()
+            'loss_kl': loss_kl.detach().cpu().numpy(),
+            'grad_norm': grad_norm.detach().cpu().numpy()
         }
         return metrics
 
@@ -136,62 +143,75 @@ class Trainer:
         # exploration loop
         obs = self.env.reset(save_gif)
 
+        explore = epoch%20 == 0
+        if explore:
+            print(f"Not exploring for epoch {epoch}")
+
         if save_gif:
             obs, img = self.env.reset(True)
             list_img = [Image.fromarray(img)]
         else:
             obs = self.env.reset()
 
-        episode = Episode(100)
+        episode = Episode(self.exploration_time)
         counter = tqdm(range(self.exploration_time), desc=f"Exp Epoch {epoch}")
         total_reward = 0
+        ep_done = 0
+        ep_reward = 0
 
         with torch.no_grad():
-            state = None
+            self.policy.reset()
+            done = False
             for t in counter:
-                action, state = self.policy.act(obs.to(self.device), self.env.sample(), state=state)
-                action = action + torch.randn_like(action) * 0.3
+                action = self.policy.act(obs.to(self.device), explore=explore)
 
                 reward = 0
                 for i in range(self.repeat_action):
-                    if save_gif and i%2 == 0:
-                        next_obs, r, done, _, img = self.env.step(action, return_obs=True)
-                        list_img.append(Image.fromarray(img))
+                    if not done:
+                        # skipping some frames
+                        if save_gif and i%4 == 0:
+                            next_obs, r, done, _, img = self.env.step(action, return_obs=True)
+                            list_img.append(Image.fromarray(img))
+                        else:
+                            next_obs, r, done, _ = self.env.step(action)
                     else:
-                        next_obs, r, done, _ = self.env.step(action)
+                        ep_done += 1
+                        total_reward += ep_reward
+                        ep_reward = 0
+                        done = False
+                        # skipping some frames
+                        if save_gif and i%4 == 0:
+                            next_obs, img = self.env.reset(return_obs=True)
+                            list_img.append(Image.fromarray(img))
+                        else:
+                            next_obs = self.env.reset()
+                        break
 
                     reward += r
-                    if done:
-                        break
                 episode.append(obs, action, reward, done)
                 obs = next_obs
 
-                total_reward += reward
+                ep_reward += reward
 
-                if done:
-                    # print(f"Total reward for the episode was {total_reward}")
-                    total_reward = 0
-                    episode.end()
-                    self.buffer.store(episode)
-                    episode = Episode(100)
-                    if save_gif:
-                        list_img[0].save(f"{self.output_path}/ep_{epoch}.gif", save_all=True, append_images=list_img[1:])
-                        obs, img = self.env.reset(True)
-                        list_img = [Image.fromarray(img)]
-                    else:
-                        obs = self.env.reset()
+            if ep_done == 0:
+                ep_done = 1
+
+            if save_gif:
+                list_img[0].save(f"{self.output_path}/ep_{epoch}.gif", save_all=True, append_images=list_img[1:])
+
+            episode.end()
+            self.buffer.store(episode)
         return {
-            'reward': total_reward,
+            'reward': total_reward / ep_done,
             'animation': f"{self.output_path}/ep_{epoch}.gif"
         }
 
     def train(self, epochs: int):
 
         while len(self.buffer.episodes) < self.seed_episodes:
-            episode = Episode(100)
+            episode = Episode(self.exploration_time)
             obs = self.env.reset()
-            done = False
-            while not done:
+            for _ in range(self.exploration_time):
                 action = self.env.sample()
                 reward = 0
                 for _ in range(self.repeat_action):
@@ -221,5 +241,5 @@ class Trainer:
             self.tracker.step(metrics)
 
             metrics = self.tracker.terminate()
-
-            wandb.log(metrics)
+            if self.track_wandb:
+                wandb.log(metrics)

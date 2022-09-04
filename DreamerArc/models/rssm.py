@@ -78,7 +78,7 @@ class RSSM(nn.Module):
     def __init__(self,
         action_dim: int,
         state_dim: int=200,
-        latent_dim: int=30,
+        latent_dim: int=32,
         hidden_dim: int=200,
         embedding_dim: int=1024,
         activation=F.relu
@@ -171,7 +171,7 @@ class RSSM(nn.Module):
         stoch_shape = s.shape
 
         stochastic_states, states = [], []
-        for a in actions.unbind():
+        for a in actions.unbind(dim=0):
             h = self.forward_deterministic_state(h, s, a)
             s = self.forward_prior(h)
             states.append(h)
